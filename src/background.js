@@ -1,3 +1,6 @@
+// Import SettingsManager for service worker context
+importScripts('settings_manager.js');
+
 var settingsManager = new SettingsManager();
 
 Array.prototype.unique = function() {
@@ -32,28 +35,24 @@ function openTab(urls, delay, windowId, openerTabId, tabPosition, closeTime) {
 
 	chrome.tabs.create(obj, function(tab) {
 		if(closeTime > 0) {
-			window.setTimeout(function() {
+			setTimeout(function() {
 				chrome.tabs.remove(tab.id);
 			}, closeTime*1000);
 		}
 	});
 
 	if(urls.length > 0) {
-		window.setTimeout(function() {openTab(urls, delay, windowId, openerTabId, tabPosition, closeTime)}, delay*1000);
+		setTimeout(function() {openTab(urls, delay, windowId, openerTabId, tabPosition, closeTime)}, delay*1000);
 	}
 
 }
 
-function copyToClipboard( text ){
-    var copyDiv = document.createElement("textarea");
-    copyDiv.contentEditable = true;
-    document.body.appendChild(copyDiv);
-    copyDiv.innerHTML = text;
-    copyDiv.unselectable = "off";
-    copyDiv.focus();
-    document.execCommand("SelectAll");
-    document.execCommand("Copy", false, null);
-    document.body.removeChild(copyDiv);
+async function copyToClipboard(text) {
+    try {
+        await navigator.clipboard.writeText(text);
+    } catch (err) {
+        console.error('Failed to copy text: ', err);
+    }
 }
 
 function pad(number, length) {
@@ -125,11 +124,11 @@ function handleRequests(request, sender, callback){
 			for (let i = 0; i < request.urls.length; i++) {
 				text += formatLink(request.urls[i], request.setting.options.copy);
 			}
-			
+
 			if(request.setting.options.copy == AS_LIST_LINK_HTML) {
 				text = "<ul>\n"+text+"</ul>\n"
 			}
-			
+
 			copyToClipboard(text);
 			break;
 		case "bm":
@@ -181,55 +180,80 @@ function handleRequests(request, sender, callback){
 
 		break;
 	case "init":
-		callback(settingsManager.load());
+		settingsManager.load().then(callback);
+		return true; // Will respond asynchronously
 		break;
 	case "update":
 		settingsManager.save(request.settings);
-	
+
 		chrome.windows.getAll({
 			populate: true
 		}, function(windowList){
-			windowList.forEach(function(window){
-				window.tabs.forEach(function(tab){
-					chrome.tabs.sendMessage(tab.id, {
-						message: "update",
-						settings: settingsManager.load()
-					}, null);
+			settingsManager.load().then(function(settings) {
+				windowList.forEach(function(window){
+					if (!window || !window.tabs) return;
+					window.tabs.forEach(function(tab){
+						if (!tab || !tab.id) return;
+						chrome.tabs.sendMessage(tab.id, {
+							message: "update",
+							settings: settings
+						}, function(response) {
+							// Handle response or ignore if no content script
+							if (chrome.runtime.lastError) {
+								// Silently ignore - tab doesn't have content script
+								return;
+							}
+						});
+					})
 				})
-			})
+			});
 		});
-	
+
 		break;
 	}
 }
 
-chrome.extension.onMessage.addListener(handleRequests)
+chrome.runtime.onMessage.addListener(handleRequests)
 
 
-if (!settingsManager.isInit()) {
-	// initialize settings manager with defaults and to stop this appearing again
-	settingsManager.init();
-	
-	// inject Linkclump into windows currently open to make it just work
-	chrome.windows.getAll({ populate: true }, function(windows) {
-		for (var i = 0; i < windows.length; ++i) {
-			for (var j = 0; j < windows[i].tabs.length; ++j) {
-				if (!/^https?:\/\//.test(windows[i].tabs[j].url)) continue;
-				chrome.tabs.executeScript(windows[i].tabs[j].id, { file: "linkclump.js" });
+settingsManager.isInit().then((isInit) => {
+	if (!isInit) {
+		// initialize settings manager with defaults and to stop this appearing again
+		settingsManager.init();
+
+		// inject Linkclump into windows currently open to make it just work
+		chrome.windows.getAll({ populate: true }, function(windows) {
+			for (var i = 0; i < windows.length; ++i) {
+				if (!windows[i] || !windows[i].tabs) continue;
+				for (var j = 0; j < windows[i].tabs.length; ++j) {
+					if (!windows[i].tabs[j] || !/^https?:\/\//.test(windows[i].tabs[j].url)) continue;
+					const tabId = windows[i].tabs[j].id;
+					chrome.scripting.executeScript({
+						target: { tabId: tabId },
+						files: ["linkclump.js"]
+					}).catch((error) => {
+						// Ignore errors for tabs we can't inject into (like chrome:// pages)
+						console.log(`Could not inject into tab ${tabId}: ${error.message}`);
+					});
+				}
 			}
-		}
-	});
-	
-	// pop up window to show tour and options page
-	chrome.windows.create({
-		url: document.location.protocol + "//" + document.location.host + "/pages/options.html?init=true",
-		width: 800,
-		height: 850,
-		left: screen.width / 2 - 800 / 2,
-		top: screen.height / 2 - 700 / 2
-	});
-} else if (!settingsManager.isLatest()) {
-	settingsManager.update();
-}
+		});
+
+		// pop up window to show tour and options page
+		chrome.windows.create({
+			url: chrome.runtime.getURL("pages/options.html?init=true"),
+			width: 800,
+			height: 850,
+			left: Math.floor((1920 / 2) - (800 / 2)), // fallback dimensions
+			top: Math.floor((1080 / 2) - (700 / 2))
+		});
+	} else {
+		settingsManager.isLatest().then((isLatest) => {
+			if (!isLatest) {
+				settingsManager.update();
+			}
+		});
+	}
+});
 
 

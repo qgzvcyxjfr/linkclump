@@ -3,17 +3,25 @@ var CURRENT_VERSION = "5";
 function SettingsManager() {}
 
 SettingsManager.prototype.load = function() {
-	try {
-		// load data from local storage
-		var data = localStorage["settings"];
-		
-		// attempt to parse, if unable then make the assumption it has been corrupted
-		return JSON.parse(data)
-	} catch(error) {
-		var settings = this.init();
-		settings.error = "Error: "+error+"|Data:"+data;
-		return settings;
-	}
+	return new Promise((resolve, reject) => {
+		chrome.storage.local.get(['settings'], function(result) {
+			if (chrome.runtime.lastError) {
+				var settings = this.init();
+				settings.error = "Error: " + chrome.runtime.lastError.message;
+				resolve(settings);
+			} else if (result.settings) {
+				try {
+					resolve(typeof result.settings === 'string' ? JSON.parse(result.settings) : result.settings);
+				} catch(error) {
+					var settings = this.init();
+					settings.error = "Error: " + error + "|Data:" + result.settings;
+					resolve(settings);
+				}
+			} else {
+				resolve(this.init());
+			}
+		}.bind(this));
+	});
 };
 
 SettingsManager.prototype.save = function(settings) {
@@ -21,16 +29,26 @@ SettingsManager.prototype.save = function(settings) {
 	if (settings.error !== undefined) {
 		delete settings.error;
 	}
-	
-	localStorage["settings"] = JSON.stringify(settings);
+
+	chrome.storage.local.set({
+		'settings': settings
+	});
 };
 
 SettingsManager.prototype.isInit = function() {
-	return (localStorage["version"] !== undefined);
+	return new Promise((resolve) => {
+		chrome.storage.local.get(['version'], function(result) {
+			resolve(result.version !== undefined);
+		});
+	});
 };
 
 SettingsManager.prototype.isLatest = function() {
-	return (localStorage["version"] === CURRENT_VERSION);
+	return new Promise((resolve) => {
+		chrome.storage.local.get(['version'], function(result) {
+			resolve(result.version === CURRENT_VERSION);
+		});
+	});
 };
 
 SettingsManager.prototype.init = function() {
@@ -57,15 +75,19 @@ SettingsManager.prototype.init = function() {
 		};
 
 	// save settings to store
-	localStorage["settings"] = JSON.stringify(settings);
-	localStorage["version"] = CURRENT_VERSION;
-	
+	chrome.storage.local.set({
+		'settings': settings,
+		'version': CURRENT_VERSION
+	});
+
 	return settings;
 };
 
 
 SettingsManager.prototype.update = function() {
-	if (!this.isInit()) {
-		this.init();
-	}
+	return this.isInit().then((isInit) => {
+		if (!isInit) {
+			this.init();
+		}
+	});
 };
